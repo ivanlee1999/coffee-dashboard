@@ -10,9 +10,11 @@ Endpoints:
 
 import json
 from datetime import datetime, timezone
+from zipfile import BadZipFile
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy.orm import Session
 
 from analysis import analyze_brew
@@ -44,7 +46,7 @@ def on_startup():
 def _serialize_brew_summary(brew: Brew) -> dict:
     return {
         "id": brew.id,
-        "date": brew.created_at.isoformat() + "Z" if brew.created_at else None,
+        "date": brew.created_at.isoformat().replace("+00:00", "Z") if brew.created_at else None,
         "bean_name": brew.bean_name,
         "roast_level": brew.roast_level,
         "grinder_brand": brew.grinder_brand,
@@ -115,8 +117,8 @@ async def create_brew(
     # Parse xlsx
     try:
         parsed = parse_brew_xlsx(contents)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    except (ValueError, BadZipFile, InvalidFileException) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid file: {exc}")
 
     # Run analysis
     analysis = analyze_brew(

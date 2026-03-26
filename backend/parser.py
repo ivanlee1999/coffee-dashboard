@@ -114,11 +114,13 @@ def _parse_elapsed(value) -> float | None:
     # Already numeric
     if isinstance(value, (int, float)):
         v = float(value)
-        # Heuristic: Excel time fractions are < 1 for durations under ~24 h.
-        # If the value is between 0 and 1 exclusive and seems too small to be
-        # raw seconds for a brew (brews rarely last < 1 s), treat as fraction
-        # of a day.
-        if 0 < v < 1:
+        # Heuristic: Excel encodes times as fractions of a day.  A 20-minute
+        # brew is only ~0.0139 in that encoding, whereas sub-second sample
+        # intervals (e.g. 0.2 s, 0.5 s) are much larger fractions.  We use
+        # a conservative threshold: values below 0.01 (≈ 864 s ≈ 14.4 min)
+        # are almost certainly Excel day-fractions, not raw seconds.
+        # Values >= 0.01 but < 1 are treated as literal sub-second intervals.
+        if 0 < v < 0.01:
             return v * 86400.0
         return v
 
