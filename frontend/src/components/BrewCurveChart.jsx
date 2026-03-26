@@ -13,10 +13,10 @@ import {
 } from "recharts";
 
 const PHASE_COLORS = [
-  "rgba(217, 119, 6, 0.12)",   // amber – bloom
-  "rgba(59, 130, 246, 0.10)",  // blue – pour 2
-  "rgba(16, 185, 129, 0.10)",  // green – pour 3
-  "rgba(168, 85, 247, 0.10)",  // purple – pour 4+
+  "rgba(217, 119, 6, 0.12)",
+  "rgba(59, 130, 246, 0.10)",
+  "rgba(16, 185, 129, 0.10)",
+  "rgba(168, 85, 247, 0.10)",
 ];
 
 export default function BrewCurveChart({ series, phases, events }) {
@@ -28,7 +28,6 @@ export default function BrewCurveChart({ series, phases, events }) {
     );
   }
 
-  // Merge all series into a single dataset keyed by time
   const timeMap = new Map();
   const addSeries = (arr, key) => {
     if (!arr) return;
@@ -41,7 +40,6 @@ export default function BrewCurveChart({ series, phases, events }) {
   addSeries(series.flow_out, "flow_out");
   addSeries(series.flow_in, "flow_in");
   addSeries(series.weight, "weight");
-  addSeries(series.temp_basket, "temp_basket");
 
   const data = [...timeMap.values()].sort((a, b) => a.t - b.t);
 
@@ -55,7 +53,6 @@ export default function BrewCurveChart({ series, phases, events }) {
         <span>📈</span> Brew Curve
       </h2>
 
-      {/* Flow + Weight chart */}
       <div className="h-72">
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={data} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
@@ -76,7 +73,6 @@ export default function BrewCurveChart({ series, phases, events }) {
               tick={{ fontSize: 11 }}
               label={{ value: "g", angle: 90, position: "insideRight", fontSize: 11 }}
             />
-
             <Tooltip
               contentStyle={{ fontSize: 12 }}
               formatter={(val, name) => [
@@ -87,7 +83,6 @@ export default function BrewCurveChart({ series, phases, events }) {
             />
             <Legend wrapperStyle={{ fontSize: 12 }} />
 
-            {/* Phase highlights */}
             {(phases || []).map((phase, i) => (
               <ReferenceArea
                 key={phase.name}
@@ -104,7 +99,6 @@ export default function BrewCurveChart({ series, phases, events }) {
               />
             ))}
 
-            {/* Event lines */}
             {eventLines.map((ev, i) => (
               <ReferenceLine
                 key={`${ev.type}-${i}`}
@@ -152,38 +146,6 @@ export default function BrewCurveChart({ series, phases, events }) {
           </ComposedChart>
         </ResponsiveContainer>
       </div>
-
-      {/* Temperature chart */}
-      {series.temp_basket && series.temp_basket.length > 0 && (
-        <>
-          <h3 className="text-sm font-medium text-stone-500 mt-3">Temperature</h3>
-          <div className="h-36">
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={data} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
-                <XAxis dataKey="t" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} domain={["auto", "auto"]} />
-                <Tooltip
-                  contentStyle={{ fontSize: 12 }}
-                  formatter={(val) => [
-                    typeof val === "number" ? val.toFixed(1) + " °C" : val,
-                    "Basket Temp",
-                  ]}
-                  labelFormatter={(t) => `${Number(t).toFixed(1)}s`}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="temp_basket"
-                  name="Basket Temp"
-                  stroke="#f59e0b"
-                  strokeWidth={2}
-                  dot={false}
-                />
-              </ComposedChart>
-            </ResponsiveContainer>
-          </div>
-        </>
-      )}
     </div>
   );
 }
