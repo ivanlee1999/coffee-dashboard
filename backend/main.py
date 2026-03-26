@@ -43,10 +43,23 @@ def on_startup():
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _ensure_utc(dt: datetime | None) -> str | None:
+    """Return an ISO 8601 string with a trailing 'Z' for any datetime.
+
+    Handles both timezone-aware (``+00:00`` → ``Z``) and naive datetimes
+    (assumed UTC, as produced by ``datetime.utcnow`` and SQLite).
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
 def _serialize_brew_summary(brew: Brew) -> dict:
     return {
         "id": brew.id,
-        "date": brew.created_at.isoformat().replace("+00:00", "Z") if brew.created_at else None,
+        "date": _ensure_utc(brew.created_at),
         "bean_name": brew.bean_name,
         "roast_level": brew.roast_level,
         "grinder_brand": brew.grinder_brand,
