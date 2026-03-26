@@ -81,7 +81,14 @@ def _load_rows(file_obj) -> list[dict]:
     header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
     headers = [str(h).strip().lower() if h else "" for h in header_row]
 
-    # Validate
+    # Detect format
+    if "timestamp" in headers and "actual weight" in headers:
+        # Format 2: scale app export (Timestamp, Brew time, Actual weight, ...)
+        rows = _load_rows_format2(headers, ws)
+        wb.close()
+        return rows
+
+    # Validate Format 1 (Decent-style)
     found = set(headers)
     missing = REQUIRED_COLUMNS - found
     if missing:
@@ -106,6 +113,62 @@ def _load_rows(file_obj) -> list[dict]:
 
     wb.close()
     return rows
+
+
+def _load_rows_format2(headers: list, ws) -> list[dict]:
+    """
+    Parse Format 2: scale app exports with columns:
+    Timestamp, Brew time, Actual weight, Old weight, Actual smoothed weight, ...
+    
+    Derives elapsed time from Timestamp column (HH:MM:SS.mmm).
+    Flow out is computed from weight delta / time delta.
+    """
+    from datetime import datetime as _dt
+
+    col_map = {name: idx for idx, name in enumerate(headers)}
+    ts_idx = col_map.get("timestamp")
+    weight_idx = col_map.get("actual smoothed weight") or col_map.get("actual weight")
+
+    rows_raw = []
+    start_ts = None
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if row is None or all(c is None for c in row):
+            continue
+        ts_str = str(row[ts_idx]).strip() if ts_idx is not None and row[ts_idx] else ""
+        weight = float(row[weight_idx]) if weight_idx is not None and row[weight_idx] is not None else 0.0
+        try:
+            ts = _dt.strptime(ts_str, "%H:%M:%S.%f")
+        except ValueError:
+            try:
+                ts = _dt.strptime(ts_str, "%H:%M:%S")
+            except ValueError:
+                continue
+        if start_ts is None:
+            start_ts = ts
+        elapsed = (ts - start_ts).total_seconds()
+        rows_raw.append((elapsed, weight))
+
+    # Compute flow_out from smoothed weight derivative
+    entries = []
+    for i, (t, w) in enumerate(rows_raw):
+        if i > 0 and rows_raw[i-1][0] > 0:
+            dt = t - rows_raw[i-1][0]
+            dw = w - rows_raw[i-1][1]
+            flow_out = max(0.0, dw / dt) if dt > 0 else 0.0
+        else:
+            flow_out = 0.0
+        entries.append({
+            "elapsed": t,
+            "pressure": 0.0,
+            "current_total_shot_weight": w,
+            "flow_in": 0.0,
+            "flow_out": flow_out,
+            "water_temperature_boiler": 0.0,
+            "water_temperature_in": 0.0,
+            "water_temperature_basket": 0.0,
+        })
+
+    return entries
 
 
 def _detect_elapsed_encoding(raw_values: list) -> str:
