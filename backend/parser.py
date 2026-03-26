@@ -89,12 +89,19 @@ def _load_rows(file_obj) -> list[dict]:
 
     col_map = {name: idx for idx, name in enumerate(headers)}
     rows = []
+    info_type_idx = col_map.get("information_type")
     for row in ws.iter_rows(min_row=2, values_only=True):
         if row is None or all(c is None for c in row):
             continue
+        # Skip metadata/header rows — only process 'moment' rows
+        if info_type_idx is not None and len(row) > info_type_idx:
+            row_type = str(row[info_type_idx]).strip().lower() if row[info_type_idx] else ""
+            if row_type == "meta":
+                continue
         entry = {}
         for col_name in REQUIRED_COLUMNS:
-            entry[col_name] = row[col_map[col_name]]
+            idx = col_map[col_name]
+            entry[col_name] = row[idx] if idx < len(row) else None
         rows.append(entry)
 
     wb.close()
@@ -208,6 +215,21 @@ def _normalize_rows(rows: list[dict]) -> list[dict]:
             "temp_in": _safe_float(row["water_temperature_in"]),
             "temp_basket": _safe_float(row["water_temperature_basket"]),
         })
+    # Truncate data when scale is removed mid-brew:
+    # detect when weight drops > 50g in < 1s after a valid peak (scale lifted off)
+    if len(points) > 10:
+        max_w = max(p["weight"] for p in points)
+        if max_w > 20:  # only if we had meaningful weight
+            truncate_at = None
+            for i in range(1, len(points)):
+                dt = points[i]["t"] - points[i-1]["t"]
+                dw = points[i]["weight"] - points[i-1]["weight"]
+                if dt > 0 and dw < -30 and points[i-1]["weight"] > 20:
+                    truncate_at = i
+                    break
+            if truncate_at is not None:
+                points = points[:truncate_at]
+
     return points
 
 
@@ -236,15 +258,24 @@ def _smooth(values: list[float], window: int = 5) -> list[float]:
 
 def _detect_pours(points: list[dict]) -> list[dict]:
     """
-    Detect pour phases from flow_in signal.
+    Detect pour phases from flow_in or flow_out signal.
 
-    A pour starts when flow_in exceeds FLOW_IN_THRESHOLD for at least
+    Uses flow_in if available; falls back to flow_out for scales that
+    only export outbound flow (e.g. Decent-style .xlsx exports).
+    A pour starts when the flow signal exceeds FLOW_IN_THRESHOLD for at least
     MIN_SAMPLES_ABOVE consecutive samples, and ends when it drops below.
     """
     if not points:
         return []
 
-    above = [p["flow_in"] > FLOW_IN_THRESHOLD for p in points]
+    # Determine which signal to use
+    avg_flow_in = sum(p["flow_in"] for p in points) / len(points)
+    use_flow_out = avg_flow_in < 0.01  # flow_in not available — use flow_out
+
+    if use_flow_out:
+        above = [p["flow_out"] > FLOW_IN_THRESHOLD for p in points]
+    else:
+        above = [p["flow_in"] > FLOW_IN_THRESHOLD for p in points]
     regions: list[tuple[int, int]] = []
     in_region = False
     start = 0
