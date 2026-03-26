@@ -27,6 +27,9 @@ MIN_POUR_DURATION_S = 2.0     # seconds – ignore pours shorter than this
 MERGE_GAP_S = 3.0             # seconds – merge pours separated by less than this
 MIN_SAMPLES_ABOVE = 2         # consecutive samples above threshold to start a pour
 
+# Max plausible brew duration (2 hours). Used to distinguish day-fractions from seconds.
+MAX_BREW_SECONDS = 7200.0
+
 
 def parse_brew_xlsx(file_obj) -> dict:
     """
@@ -98,42 +101,40 @@ def _load_rows(file_obj) -> list[dict]:
     return rows
 
 
-def _parse_elapsed(value) -> float | None:
+def _detect_elapsed_encoding(raw_values: list) -> str:
     """
-    Convert an elapsed value to seconds (float).
+    Determine how elapsed time is encoded in a batch of raw values.
 
-    Handles:
-      - numeric seconds (int/float)
-      - Excel time fraction (e.g. 0.00162037 for ~140 s)
-      - HH:MM:SS or MM:SS strings
-      - datetime/timedelta objects
+    Returns one of:
+        'seconds'      – values are already in seconds (e.g. 0.071, 5.3, 130.0)
+        'day_fraction' – values are Excel day fractions (e.g. 0.000820, 0.001505)
+        'string'       – values are strings (handled by _parse_elapsed_string)
+        'mixed'        – mixed types, fall back to per-value heuristic
     """
-    if value is None:
-        return None
+    numerics = [v for v in raw_values if isinstance(v, (int, float)) and v is not None]
+    if not numerics:
+        return 'string'
 
-    # Already numeric
-    if isinstance(value, (int, float)):
-        v = float(value)
-        # Heuristic: Excel encodes times as fractions of a day.  A 20-minute
-        # brew is only ~0.0139 in that encoding, whereas sub-second sample
-        # intervals (e.g. 0.2 s, 0.5 s) are much larger fractions.  We use
-        # a conservative threshold: values below 0.01 (≈ 864 s ≈ 14.4 min)
-        # are almost certainly Excel day-fractions, not raw seconds.
-        # Values >= 0.01 but < 1 are treated as literal sub-second intervals.
-        if 0 < v < 0.01:
-            return v * 86400.0
-        return v
+    max_val = max(numerics)
+    min_val = min(v for v in numerics if v >= 0)
 
-    if isinstance(value, timedelta):
-        return value.total_seconds()
+    # If max value is already in a plausible brew-seconds range, treat as seconds
+    if max_val >= 1.0:
+        return 'seconds'
 
-    if isinstance(value, datetime):
-        # Midnight-based encoding
-        midnight = value.replace(hour=0, minute=0, second=0, microsecond=0)
-        return (value - midnight).total_seconds()
+    # All values are between 0 and 1 — could be day fractions or sub-second intervals
+    # Check: does max_val * 86400 fall within a plausible brew time?
+    max_as_seconds = max_val * 86400.0
+    if 5.0 <= max_as_seconds <= MAX_BREW_SECONDS:
+        return 'day_fraction'
 
-    # String parsing
-    s = str(value).strip()
+    # Very small values that converted are outside plausible range — treat as seconds
+    return 'seconds'
+
+
+def _parse_elapsed_string(s: str) -> float | None:
+    """Parse a string elapsed value (HH:MM:SS, MM:SS, or float string)."""
+    s = s.strip()
     parts = s.split(":")
     try:
         if len(parts) == 3:
@@ -147,6 +148,35 @@ def _parse_elapsed(value) -> float | None:
         return None
 
 
+def _parse_elapsed(value, encoding: str = 'seconds') -> float | None:
+    """
+    Convert an elapsed value to seconds (float).
+
+    Parameters
+    ----------
+    value    : raw cell value
+    encoding : 'seconds' | 'day_fraction' | 'string' — determined at batch level
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+
+    if isinstance(value, datetime):
+        midnight = value.replace(hour=0, minute=0, second=0, microsecond=0)
+        return (value - midnight).total_seconds()
+
+    if isinstance(value, (int, float)):
+        v = float(value)
+        if encoding == 'day_fraction':
+            return v * 86400.0
+        return v  # 'seconds' or fallback
+
+    # String value
+    return _parse_elapsed_string(str(value))
+
+
 def _safe_float(v, default=0.0) -> float:
     if v is None:
         return default
@@ -158,9 +188,14 @@ def _safe_float(v, default=0.0) -> float:
 
 def _normalize_rows(rows: list[dict]) -> list[dict]:
     """Convert raw row dicts to typed point dicts with time in seconds."""
+    # Determine encoding from all elapsed values at once (fixes the regression
+    # where the old per-value heuristic misclassified day fractions > 0.01).
+    raw_elapsed = [r["elapsed"] for r in rows]
+    encoding = _detect_elapsed_encoding(raw_elapsed)
+
     points = []
     for row in rows:
-        t = _parse_elapsed(row["elapsed"])
+        t = _parse_elapsed(row["elapsed"], encoding=encoding)
         if t is None:
             continue
         points.append({
@@ -204,15 +239,13 @@ def _detect_pours(points: list[dict]) -> list[dict]:
     Detect pour phases from flow_in signal.
 
     A pour starts when flow_in exceeds FLOW_IN_THRESHOLD for at least
-    MIN_SAMPLES_ABOVE consecutive samples, and ends when it drops below for
-    the same number of samples.
+    MIN_SAMPLES_ABOVE consecutive samples, and ends when it drops below.
     """
     if not points:
         return []
 
-    # Identify raw above-threshold regions
     above = [p["flow_in"] > FLOW_IN_THRESHOLD for p in points]
-    regions: list[tuple[int, int]] = []  # (start_idx, end_idx) inclusive
+    regions: list[tuple[int, int]] = []
     in_region = False
     start = 0
     consecutive = 0
@@ -224,7 +257,6 @@ def _detect_pours(points: list[dict]) -> list[dict]:
                 if consecutive >= MIN_SAMPLES_ABOVE:
                     in_region = True
                     start = i - consecutive + 1
-            # else: already in region, continue
         else:
             if in_region:
                 regions.append((start, i - 1))
@@ -234,16 +266,13 @@ def _detect_pours(points: list[dict]) -> list[dict]:
     if in_region:
         regions.append((start, len(points) - 1))
 
-    # Convert to time-based
     raw_phases = [
         (points[s]["t"], points[e]["t"])
         for s, e in regions
     ]
 
-    # Filter short pours
     raw_phases = [(s, e) for s, e in raw_phases if (e - s) >= MIN_POUR_DURATION_S]
 
-    # Merge close pours
     merged: list[tuple[float, float]] = []
     for s, e in raw_phases:
         if merged and (s - merged[-1][1]) < MERGE_GAP_S:
@@ -251,13 +280,9 @@ def _detect_pours(points: list[dict]) -> list[dict]:
         else:
             merged.append((s, e))
 
-    # Name phases
     phases = []
     for i, (s, e) in enumerate(merged):
-        if i == 0:
-            name = "Bloom"
-        else:
-            name = f"Pour {i + 1}"
+        name = "Bloom" if i == 0 else f"Pour {i + 1}"
         phases.append({
             "name": name,
             "start_s": round(s, 1),
@@ -270,16 +295,11 @@ def _detect_pours(points: list[dict]) -> list[dict]:
 def _detect_events(points: list[dict], phases: list[dict]) -> list[dict]:
     """Detect key brew events: bloom end, drawdown points."""
     events = []
-
     if not phases:
         return events
 
-    # Bloom end = end of the first phase
     events.append({"type": "bloom_end", "time_s": phases[0]["end_s"]})
 
-    # Drawdown = after each pour (except possibly the last), when flow_in is
-    # near zero and weight stabilises or flow_out dominates.  For MVP, mark
-    # the midpoint of each inter-pour gap.
     for i in range(len(phases) - 1):
         gap_start = phases[i]["end_s"]
         gap_end = phases[i + 1]["start_s"]
@@ -289,7 +309,6 @@ def _detect_events(points: list[dict], phases: list[dict]) -> list[dict]:
                 "time_s": round((gap_start + gap_end) / 2, 1),
             })
 
-    # Pour start/end events
     for phase in phases:
         events.append({"type": "pour_start", "time_s": phase["start_s"]})
         events.append({"type": "pour_end", "time_s": phase["end_s"]})
@@ -300,10 +319,8 @@ def _detect_events(points: list[dict], phases: list[dict]) -> list[dict]:
 def _build_series(points: list[dict]) -> dict:
     """Build chart-ready series from parsed points."""
     ts = [p["t"] for p in points]
-    flow_out_raw = [p["flow_out"] for p in points]
-    flow_out_smooth = _smooth(flow_out_raw)
-    flow_in_raw = [p["flow_in"] for p in points]
-    flow_in_smooth = _smooth(flow_in_raw)
+    flow_out_smooth = _smooth([p["flow_out"] for p in points])
+    flow_in_smooth = _smooth([p["flow_in"] for p in points])
 
     return {
         "flow_out": [{"t": t, "v": round(v, 2)} for t, v in zip(ts, flow_out_smooth)],
