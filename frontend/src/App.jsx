@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import BrewLogger from "./components/BrewLogger";
 import BrewCurveChart from "./components/BrewCurveChart";
 import AnalysisPanel from "./components/AnalysisPanel";
+import ChatPanel from "./components/ChatPanel";
 import BrewHistory from "./components/BrewHistory";
 
 export default function App() {
@@ -111,10 +112,14 @@ export default function App() {
             </div>
           </div>
 
-          {/* Right: Analysis */}
-          <div className="lg:col-span-3">
+          {/* Right: Analysis + Chat */}
+          <div className="lg:col-span-3 space-y-6">
             <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm min-h-[400px]">
               <AnalysisPanel data={currentBrew} />
+            </div>
+
+            <div className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm">
+              <ChatPanel brew={currentBrew} />
             </div>
           </div>
         </div>

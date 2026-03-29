@@ -2,24 +2,33 @@
 FastAPI application for the Coffee Brew Dashboard.
 
 Endpoints:
-    POST /api/brews       – upload brew data + xlsx, get analysis
-    GET  /api/brews       – list all saved brews (summary)
-    GET  /api/brews/{id}  – full detail for one brew
-    GET  /api/healthz     – health check
+    POST /api/brews              – upload brew data + xlsx, get analysis
+    GET  /api/brews              – list all saved brews (summary)
+    GET  /api/brews/{id}         – full detail for one brew
+    POST /api/brews/{id}/chat    – chat with Claude about a brew
+    GET  /api/healthz            – health check
 """
 
 import json
+import logging
+import os
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Literal
 from zipfile import BadZipFile
 
+import httpx
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from openpyxl.utils.exceptions import InvalidFileException
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from analysis import analyze_brew
 from models import Brew, get_db, init_db
 from parser import parse_brew_xlsx
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Coffee Brew Dashboard API", version="0.1.0")
 
@@ -180,6 +189,160 @@ def get_brew(brew_id: int, db: Session = Depends(get_db)):
     if not brew:
         raise HTTPException(status_code=404, detail="Brew not found.")
     return _serialize_brew_detail(brew)
+
+
+# ---------------------------------------------------------------------------
+# Chat with Claude – models & helpers
+# ---------------------------------------------------------------------------
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=10000)
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage] = Field(..., min_length=1)
+
+
+def _get_claude_auth() -> tuple[str, str] | tuple[None, None]:
+    """Return (auth_type, token) or (None, None).
+
+    Prefers ANTHROPIC_API_KEY env var; falls back to OAuth token from
+    ~/.claude/.credentials.json (useful when the file is mounted into the
+    container).
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if api_key:
+        return ("api_key", api_key)
+
+    creds_path = Path.home() / ".claude" / ".credentials.json"
+    if creds_path.exists():
+        try:
+            creds = json.loads(creds_path.read_text())
+            token = creds.get("claudeAiOauth", {}).get("accessToken")
+            if token:
+                return ("oauth", token)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to read Claude credentials: %s", exc)
+
+    return (None, None)
+
+
+def _build_brew_chat_system_prompt(brew: Brew) -> str:
+    """Build a system prompt containing all brew context."""
+    detail = _serialize_brew_detail(brew)
+    stats = detail["stats"]
+    phases = detail["phases"]
+    issues = detail["issues"]
+    suggestions = detail["suggestions"]
+    brew_data = detail["brew"]
+
+    phase_lines = [
+        f"- {p['name']}: {p['start_s']}s to {p['end_s']}s"
+        for p in phases
+    ] or ["- No phases detected"]
+
+    return (
+        "You are a coffee brewing assistant. Answer only using the brew context below.\n"
+        "Be practical, concise, and specific.\n"
+        "\n"
+        "Brew details:\n"
+        f"- Bean: {brew_data['bean_name']}\n"
+        f"- Roast: {brew_data['roast_level']}\n"
+        f"- Grinder: {brew_data['grinder_brand']} @ {brew_data['grinder_setting']}\n"
+        f"- Dose: {brew_data['dose_weight']}g\n"
+        f"- Yield: {brew_data['actual_yield']}g (target {brew_data['target_yield']}g)\n"
+        f"- Time: {brew_data['total_time_s']}s\n"
+        f"- Ratio: 1:{stats.get('brew_ratio', 'n/a')}\n"
+        f"- Score: {detail.get('score', 'n/a')}\n"
+        "\n"
+        "Pour phases:\n"
+        + "\n".join(phase_lines)
+        + "\n\nIssues:\n"
+        + ("\n".join(f"- {item}" for item in issues) or "- None")
+        + "\n\nSuggestions:\n"
+        + ("\n".join(f"- {item}" for item in suggestions) or "- None")
+        + "\n\nTaste tags:\n"
+        + ("\n".join(f"- {tag}" for tag in brew_data.get("taste_tags", [])) or "- None")
+        + "\n\nTaste notes:\n"
+        + (brew_data.get("taste_notes") or "None")
+    )
+
+
+async def _call_claude(system_prompt: str, messages: list[dict]) -> str:
+    """Call Claude via API key (SDK) or OAuth token (httpx)."""
+    auth_type, token = _get_claude_auth()
+    if not token:
+        raise HTTPException(
+            status_code=503,
+            detail="Claude credentials are not configured. Set ANTHROPIC_API_KEY or mount ~/.claude/.credentials.json.",
+        )
+
+    if auth_type == "api_key":
+        try:
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=token)
+            response = client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=1024,
+                system=system_prompt,
+                messages=messages,
+            )
+            return response.content[0].text
+        except Exception as exc:
+            logger.exception("Claude SDK call failed")
+            raise HTTPException(status_code=502, detail=f"Claude API error: {exc}")
+
+    # OAuth path – direct HTTP
+    headers = {
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+        "x-api-key": token,
+    }
+    payload = {
+        "model": "claude-haiku-4-5",
+        "max_tokens": 1024,
+        "system": system_prompt,
+        "messages": messages,
+    }
+    try:
+        async with httpx.AsyncClient() as http:
+            resp = await http.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=headers,
+                json=payload,
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+            return resp.json()["content"][0]["text"]
+    except httpx.HTTPStatusError as exc:
+        logger.exception("Claude HTTP call failed: %s", exc.response.text)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Claude API returned {exc.response.status_code}.",
+        )
+    except Exception as exc:
+        logger.exception("Claude HTTP call failed")
+        raise HTTPException(status_code=502, detail=f"Claude API error: {exc}")
+
+
+@app.post("/api/brews/{brew_id}/chat")
+async def chat_with_brew(
+    brew_id: int,
+    payload: ChatRequest,
+    db: Session = Depends(get_db),
+):
+    brew = db.query(Brew).filter(Brew.id == brew_id).first()
+    if not brew:
+        raise HTTPException(status_code=404, detail="Brew not found.")
+
+    system_prompt = _build_brew_chat_system_prompt(brew)
+    reply = await _call_claude(
+        system_prompt,
+        [msg.model_dump() for msg in payload.messages],
+    )
+    return {"reply": reply}
 
 
 if __name__ == "__main__":

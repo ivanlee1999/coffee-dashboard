@@ -5,8 +5,10 @@ services:
       - "8095:8095"
     volumes:
       - ./data:/app/data
+      - ${HOME}/.claude:/root/.claude:ro
     environment:
       - DB_DIR=/app/data
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     restart: unless-stopped
 
   frontend:
