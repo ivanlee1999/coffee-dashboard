@@ -10,7 +10,6 @@ export default function App() {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [rightTab, setRightTab] = useState("analysis"); // "analysis" | "chat"
 
   const reloadHistory = useCallback(async () => {
     try {
@@ -31,7 +30,6 @@ export default function App() {
       }
       const data = await res.json();
       setCurrentBrew(data);
-      setRightTab("analysis");
       reloadHistory();
     } catch (err) { setError(err.message); }
     finally { setLoading(false); }
@@ -43,7 +41,6 @@ export default function App() {
       const res = await fetch(`/api/brews/${brewId}`);
       if (!res.ok) throw new Error("Failed to load brew");
       setCurrentBrew(await res.json());
-      setRightTab("analysis");
     } catch (err) { setError(err.message); }
     finally { setLoading(false); }
   }
@@ -77,8 +74,8 @@ export default function App() {
             </div>
           </div>
 
-          {/* Center: Chart */}
-          <div className="lg:col-span-6">
+          {/* Center: Chart on top, Chat below */}
+          <div className="lg:col-span-6 flex flex-col gap-3">
             <div className="rounded-lg border border-stone-200 bg-white p-3 shadow-sm">
               <BrewCurveChart
                 series={currentBrew?.series}
@@ -86,32 +83,15 @@ export default function App() {
                 events={currentBrew?.events}
               />
             </div>
+            <div className="rounded-lg border border-stone-200 bg-white p-3 shadow-sm flex-1">
+              <ChatPanel brew={currentBrew} />
+            </div>
           </div>
 
-          {/* Right: Analysis / Chat tabs */}
+          {/* Right: Analysis */}
           <div className="lg:col-span-3">
-            <div className="rounded-lg border border-stone-200 bg-white shadow-sm overflow-hidden">
-              {/* Tab bar */}
-              <div className="flex border-b border-stone-200 text-xs font-medium">
-                <button
-                  onClick={() => setRightTab("analysis")}
-                  className={`flex-1 px-3 py-2 ${rightTab === "analysis" ? "bg-white border-b-2 border-coffee-600 text-coffee-700" : "bg-stone-50 text-stone-500 hover:text-stone-700"}`}
-                >
-                  🔬 Analysis
-                </button>
-                <button
-                  onClick={() => setRightTab("chat")}
-                  className={`flex-1 px-3 py-2 ${rightTab === "chat" ? "bg-white border-b-2 border-coffee-600 text-coffee-700" : "bg-stone-50 text-stone-500 hover:text-stone-700"}`}
-                >
-                  💬 Chat
-                </button>
-              </div>
-              <div className="p-3">
-                {rightTab === "analysis"
-                  ? <AnalysisPanel data={currentBrew} />
-                  : <ChatPanel brew={currentBrew} />
-                }
-              </div>
+            <div className="rounded-lg border border-stone-200 bg-white p-3 shadow-sm">
+              <AnalysisPanel data={currentBrew} />
             </div>
           </div>
         </div>
