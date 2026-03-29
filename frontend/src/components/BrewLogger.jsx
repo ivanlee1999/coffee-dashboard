@@ -61,7 +61,7 @@ export default function BrewLogger({ onSubmit, loading }) {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
-      <h2 className="text-lg font-semibold text-coffee-800 flex items-center gap-2">
+      <h2 className="font-semibold text-coffee-800 flex items-center gap-2 mb-2">
         <span>☕</span> Brew Logger
       </h2>
 

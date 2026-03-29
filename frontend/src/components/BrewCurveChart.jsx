@@ -49,7 +49,7 @@ export default function BrewCurveChart({ series, phases, events }) {
 
   return (
     <div className="space-y-2">
-      <h2 className="text-lg font-semibold text-coffee-800 flex items-center gap-2">
+      <h2 className="font-semibold text-coffee-800 flex items-center gap-2 mb-2">
         <span>📈</span> Brew Curve
       </h2>
 
